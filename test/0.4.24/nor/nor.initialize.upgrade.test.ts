@@ -159,20 +159,18 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
       );
     });
 
-    it("Reverts if already initialized", async () => {
+    it("Reverts if was initialized with v2", async () => {
       const MAX_STUCK_PENALTY_DELAY = await nor.MAX_STUCK_PENALTY_DELAY();
-      await nor.initialize(locator, encodeBytes32String("curated-onchain-v1"), MAX_STUCK_PENALTY_DELAY);
+      await nor.harness__initialize(2n);
 
       await expect(nor.initialize(locator, moduleType, MAX_STUCK_PENALTY_DELAY)).to.be.revertedWith(
         "INIT_ALREADY_INITIALIZED",
       );
     });
 
-    it("Reverts if has been upgraded to v2 before", async () => {
+    it("Reverts if already initialized", async () => {
       const MAX_STUCK_PENALTY_DELAY = await nor.MAX_STUCK_PENALTY_DELAY();
-
-      await nor.harness__initialize(0n);
-      await nor.finalizeUpgrade_v2(locator, encodeBytes32String("curated-onchain-v1"), MAX_STUCK_PENALTY_DELAY);
+      await nor.initialize(locator, encodeBytes32String("curated-onchain-v1"), MAX_STUCK_PENALTY_DELAY);
 
       await expect(nor.initialize(locator, moduleType, MAX_STUCK_PENALTY_DELAY)).to.be.revertedWith(
         "INIT_ALREADY_INITIALIZED",
@@ -203,138 +201,6 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
       expect(await nor.getStuckPenaltyDelay()).to.equal(86400n);
       expect(await nor.getContractVersion()).to.equal(3);
       expect(await nor.getType()).to.equal(moduleType);
-    });
-  });
-
-  context("finalizeUpgrade_v2", () => {
-    let burnerAddress: string;
-    let preInitState: string;
-
-    beforeEach(async () => {
-      locator = await deployLidoLocator({ lido: lido });
-      burnerAddress = await locator.burner();
-
-      preInitState = await Snapshot.take();
-      await nor.harness__initialize(0n);
-    });
-
-    it("Reverts if Locator is zero address", async () => {
-      await expect(nor.finalizeUpgrade_v2(ZeroAddress, moduleType, 43200n)).to.be.reverted;
-    });
-
-    it("Reverts if stuck penalty delay exceeds MAX_STUCK_PENALTY_DELAY", async () => {
-      const MAX_STUCK_PENALTY_DELAY = await nor.MAX_STUCK_PENALTY_DELAY();
-      await expect(nor.finalizeUpgrade_v2(locator, "curated-onchain-v1", MAX_STUCK_PENALTY_DELAY + 1n));
-    });
-
-    it("Reverts if hasn't been initialized yet", async () => {
-      await Snapshot.restore(preInitState);
-
-      const MAX_STUCK_PENALTY_DELAY = await nor.MAX_STUCK_PENALTY_DELAY();
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, MAX_STUCK_PENALTY_DELAY)).to.be.revertedWith(
-        "CONTRACT_NOT_INITIALIZED",
-      );
-    });
-
-    it("Reverts if already initialized to v3", async () => {
-      await Snapshot.restore(preInitState);
-      const MAX_STUCK_PENALTY_DELAY = await nor.MAX_STUCK_PENALTY_DELAY();
-      await nor.initialize(locator, encodeBytes32String("curated-onchain-v1"), MAX_STUCK_PENALTY_DELAY);
-
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, MAX_STUCK_PENALTY_DELAY)).to.be.revertedWith(
-        "UNEXPECTED_CONTRACT_VERSION",
-      );
-    });
-
-    it("Reverts if already upgraded to v2", async () => {
-      const MAX_STUCK_PENALTY_DELAY = await nor.MAX_STUCK_PENALTY_DELAY();
-      await nor.finalizeUpgrade_v2(locator, encodeBytes32String("curated-onchain-v1"), MAX_STUCK_PENALTY_DELAY);
-
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, MAX_STUCK_PENALTY_DELAY)).to.be.revertedWith(
-        "UNEXPECTED_CONTRACT_VERSION",
-      );
-    });
-
-    it("Makes the contract upgraded to v2", async () => {
-      const latestBlock = BigInt(await time.latestBlock());
-
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, 86400n))
-        .to.emit(nor, "ContractVersionSet")
-        .withArgs(contractVersionV2)
-        .and.to.emit(nor, "StuckPenaltyDelayChanged")
-        .withArgs(86400n)
-        .and.to.emit(nor, "LocatorContractSet")
-        .withArgs(await locator.getAddress())
-        .and.to.emit(nor, "StakingModuleTypeSet")
-        .withArgs(moduleType);
-
-      expect(await nor.getLocator()).to.equal(await locator.getAddress());
-      expect(await nor.getInitializationBlock()).to.equal(latestBlock);
-      expect(await lido.allowance(await nor.getAddress(), burnerAddress)).to.equal(MaxUint256);
-      expect(await nor.getStuckPenaltyDelay()).to.equal(86400n);
-      expect(await nor.getContractVersion()).to.equal(contractVersionV2);
-      expect(await nor.getType()).to.equal(moduleType);
-    });
-
-    it("Migrates the contract storage from v1 to v2", async () => {
-      expect(await addNodeOperator(nor, nodeOperatorsManager, NODE_OPERATORS[firstNodeOperatorId])).to.equal(
-        firstNodeOperatorId,
-      );
-      expect(await addNodeOperator(nor, nodeOperatorsManager, NODE_OPERATORS[secondNodeOperatorId])).to.equal(
-        secondNodeOperatorId,
-      );
-      expect(await addNodeOperator(nor, nodeOperatorsManager, NODE_OPERATORS[thirdNodeOperatorId])).to.equal(
-        thirdNodeOperatorId,
-      );
-      expect(await addNodeOperator(nor, nodeOperatorsManager, NODE_OPERATORS[fourthNodeOperatorId])).to.equal(
-        fourthNodeOperatorId,
-      );
-
-      await nor.harness__unsafeResetModuleSummary();
-      const resetSummary = await nor.getStakingModuleSummary();
-      expect(resetSummary.totalExitedValidators).to.equal(0n);
-      expect(resetSummary.totalDepositedValidators).to.equal(0n);
-      expect(resetSummary.depositableValidatorsCount).to.equal(0n);
-
-      await nor.harness__unsafeSetVettedKeys(
-        firstNodeOperatorId,
-        NODE_OPERATORS[firstNodeOperatorId].depositedSigningKeysCount - 1n,
-      );
-      await nor.harness__unsafeSetVettedKeys(
-        secondNodeOperatorId,
-        NODE_OPERATORS[secondNodeOperatorId].totalSigningKeysCount + 1n,
-      );
-      await nor.harness__unsafeSetVettedKeys(
-        thirdNodeOperatorId,
-        NODE_OPERATORS[thirdNodeOperatorId].totalSigningKeysCount,
-      );
-
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, 86400n))
-        .to.emit(nor, "ContractVersionSet")
-        .withArgs(contractVersionV2)
-        .and.to.emit(nor, "StuckPenaltyDelayChanged")
-        .withArgs(86400n)
-        .and.to.emit(nor, "LocatorContractSet")
-        .withArgs(await locator.getAddress())
-        .and.to.emit(nor, "StakingModuleTypeSet")
-        .withArgs(moduleType);
-
-      const summary = await nor.getStakingModuleSummary();
-      expect(summary.totalExitedValidators).to.equal(1n + 0n + 0n + 1n);
-      expect(summary.totalDepositedValidators).to.equal(5n + 7n + 0n + 2n);
-      expect(summary.depositableValidatorsCount).to.equal(0n + 8n + 0n + 0n);
-
-      const firstNoInfo = await nor.getNodeOperator(firstNodeOperatorId, true);
-      expect(firstNoInfo.totalVettedValidators).to.equal(NODE_OPERATORS[firstNodeOperatorId].depositedSigningKeysCount);
-
-      const secondNoInfo = await nor.getNodeOperator(secondNodeOperatorId, true);
-      expect(secondNoInfo.totalVettedValidators).to.equal(NODE_OPERATORS[secondNodeOperatorId].totalSigningKeysCount);
-
-      const thirdNoInfo = await nor.getNodeOperator(thirdNodeOperatorId, true);
-      expect(thirdNoInfo.totalVettedValidators).to.equal(NODE_OPERATORS[thirdNodeOperatorId].depositedSigningKeysCount);
-
-      const fourthNoInfo = await nor.getNodeOperator(fourthNodeOperatorId, true);
-      expect(fourthNoInfo.totalVettedValidators).to.equal(NODE_OPERATORS[fourthNodeOperatorId].vettedSigningKeysCount);
     });
   });
 
@@ -378,10 +244,10 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
       await expect(nor.finalizeUpgrade_v3()).to.be.revertedWith("UNEXPECTED_CONTRACT_VERSION");
     });
 
-    it("Migrates the contract storage from v1 to v3", async () => {
+    it("Migrates the contract storage from v2 to v3", async () => {
       preInitState = await Snapshot.refresh(preInitState);
 
-      await nor.harness__initialize(0n);
+      await nor.harness__initialize(2n);
 
       expect(await addNodeOperator(nor, nodeOperatorsManager, NODE_OPERATORS[firstNodeOperatorId])).to.be.equal(
         firstNodeOperatorId,
@@ -396,39 +262,20 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
         fourthNodeOperatorId,
       );
 
-      await nor.harness__unsafeResetModuleSummary();
-      const resetSummary = await nor.getStakingModuleSummary();
-      expect(resetSummary.totalExitedValidators).to.be.equal(0n);
-      expect(resetSummary.totalDepositedValidators).to.be.equal(0n);
-      expect(resetSummary.depositableValidatorsCount).to.be.equal(0n);
-
-      await nor.harness__unsafeSetVettedKeys(
-        firstNodeOperatorId,
-        NODE_OPERATORS[firstNodeOperatorId].depositedSigningKeysCount - 1n,
-      );
-      await nor.harness__unsafeSetVettedKeys(
-        secondNodeOperatorId,
-        NODE_OPERATORS[secondNodeOperatorId].totalSigningKeysCount + 1n,
-      );
-      await nor.harness__unsafeSetVettedKeys(
-        thirdNodeOperatorId,
-        NODE_OPERATORS[thirdNodeOperatorId].totalSigningKeysCount,
-      );
-
       const checkStorage = async () => {
         const summary = await nor.getStakingModuleSummary();
         expect(summary.totalExitedValidators).to.be.equal(1n + 0n + 0n + 1n);
         expect(summary.totalDepositedValidators).to.be.equal(5n + 7n + 0n + 2n);
-        expect(summary.depositableValidatorsCount).to.be.equal(0n + 8n + 0n + 0n);
+        expect(summary.depositableValidatorsCount).to.be.equal(1n + 3n + 0n + 0n);
 
         const firstNoInfo = await nor.getNodeOperator(firstNodeOperatorId, true);
         expect(firstNoInfo.totalVettedValidators).to.be.equal(
-          NODE_OPERATORS[firstNodeOperatorId].depositedSigningKeysCount,
+          NODE_OPERATORS[firstNodeOperatorId].vettedSigningKeysCount,
         );
 
         const secondNoInfo = await nor.getNodeOperator(secondNodeOperatorId, true);
         expect(secondNoInfo.totalVettedValidators).to.be.equal(
-          NODE_OPERATORS[secondNodeOperatorId].totalSigningKeysCount,
+          NODE_OPERATORS[secondNodeOperatorId].vettedSigningKeysCount,
         );
 
         const thirdNoInfo = await nor.getNodeOperator(thirdNodeOperatorId, true);
@@ -441,16 +288,6 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
           NODE_OPERATORS[fourthNodeOperatorId].vettedSigningKeysCount,
         );
       };
-
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, 86400n))
-        .to.emit(nor, "ContractVersionSet")
-        .withArgs(contractVersionV2)
-        .and.to.emit(nor, "StuckPenaltyDelayChanged")
-        .withArgs(86400n)
-        .and.to.emit(nor, "LocatorContractSet")
-        .withArgs(await locator.getAddress())
-        .and.to.emit(nor, "StakingModuleTypeSet")
-        .withArgs(moduleType);
 
       await checkStorage();
 
@@ -469,30 +306,16 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
       await expect(nor.finalizeUpgrade_v3()).to.be.revertedWith("UNEXPECTED_CONTRACT_VERSION");
     });
 
-    it("Happy path test for update from v1: finalizeUpgrade_v2 -> finalizeUpgrade_v3", async () => {
+    it("Happy path test for update from v2: finalizeUpgrade_v3", async () => {
       preInitState = await Snapshot.refresh(preInitState);
 
-      await nor.harness__initialize(0n);
+      await nor.harness__initialize(2n);
 
       const latestBlock = BigInt(await time.latestBlock());
-      const burnerAddress = await locator.burner();
 
-      await expect(nor.finalizeUpgrade_v2(locator, moduleType, 86400n))
-        .to.emit(nor, "ContractVersionSet")
-        .withArgs(contractVersionV2)
-        .and.to.emit(nor, "StuckPenaltyDelayChanged")
-        .withArgs(86400n)
-        .and.to.emit(nor, "LocatorContractSet")
-        .withArgs(await locator.getAddress())
-        .and.to.emit(nor, "StakingModuleTypeSet")
-        .withArgs(moduleType);
-
-      expect(await nor.getLocator()).to.equal(await locator.getAddress());
       expect(await nor.getInitializationBlock()).to.equal(latestBlock);
-      expect(await lido.allowance(await nor.getAddress(), burnerAddress)).to.equal(MaxUint256);
-      expect(await nor.getStuckPenaltyDelay()).to.equal(86400n);
       expect(await nor.getContractVersion()).to.equal(contractVersionV2);
-      expect(await nor.getType()).to.equal(moduleType);
+      expect(await nor.getRewardDistributionState()).to.equal(RewardDistributionState.TransferredToModule);
 
       await expect(nor.finalizeUpgrade_v3())
         .to.emit(nor, "ContractVersionSet")
@@ -500,12 +323,9 @@ describe("NodeOperatorsRegistry.sol:initialize-and-upgrade", () => {
         .to.emit(nor, "RewardDistributionStateChanged")
         .withArgs(RewardDistributionState.Distributed);
 
-      expect(await nor.getLocator()).to.equal(await locator.getAddress());
       expect(await nor.getInitializationBlock()).to.equal(latestBlock);
-      expect(await lido.allowance(await nor.getAddress(), burnerAddress)).to.equal(MaxUint256);
-      expect(await nor.getStuckPenaltyDelay()).to.equal(86400n);
       expect(await nor.getContractVersion()).to.equal(contractVersionV3);
-      expect(await nor.getType()).to.equal(moduleType);
+      expect(await nor.getRewardDistributionState()).to.equal(RewardDistributionState.Distributed);
     });
   });
 });
