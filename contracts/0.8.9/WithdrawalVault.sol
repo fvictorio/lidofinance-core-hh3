@@ -22,16 +22,73 @@ interface ILido {
     function receiveWithdrawals() external payable;
 }
 
+contract Consolidation {
+    error InvalidPubkeyArrayLength();
+    error PubkeyArraysLengthMismatch();
+    error ConsolidationFeeReadFailed();
+    error ConsolidationFeeInvalidData();
+    error ConsolidationRequestAdditionFailed(bytes callData);
+
+    address constant CONSOLIDATION_REQUEST = 0x0000BBdDc7CE488642fb579F8B00f3a590007251;
+    uint256 internal constant PUBLIC_KEY_LENGTH = 48;
+
+    function _getConsolidationRequestFee() internal view returns (uint256) {
+        (bool success, bytes memory feeData) = CONSOLIDATION_REQUEST.staticcall("");
+
+        if (!success) {
+            revert ConsolidationFeeReadFailed();
+        }
+
+        if (feeData.length != 32) {
+            revert ConsolidationFeeInvalidData();
+        }
+
+        return abi.decode(feeData, (uint256));
+    }
+
+    function _addConsolidationRequest(
+        bytes calldata sourcePubkeys,
+        bytes calldata targetPubkeys,
+        uint256 feePerRequest
+    ) internal {
+        uint256 requestsCount = sourcePubkeys.length / PUBLIC_KEY_LENGTH;
+        bytes memory request = new bytes(96);
+
+        for (uint256 i = 0; i < requestsCount; i++) {
+            assembly {
+                calldatacopy(add(request, 32), add(sourcePubkeys.offset, mul(i, PUBLIC_KEY_LENGTH)), PUBLIC_KEY_LENGTH)
+                calldatacopy(add(request, 80), add(targetPubkeys.offset, mul(i, PUBLIC_KEY_LENGTH)), PUBLIC_KEY_LENGTH)
+            }
+
+            (bool success, ) = CONSOLIDATION_REQUEST.call{value: feePerRequest}(request);
+
+            if (!success) {
+                revert ConsolidationRequestAdditionFailed(request);
+            }
+        }
+    }
+
+    function _validatePubkeyArrays(bytes calldata sourcePubkeys, bytes calldata targetPubkeys) internal pure {
+        if (sourcePubkeys.length != targetPubkeys.length) {
+            revert PubkeyArraysLengthMismatch();
+        }
+        if (sourcePubkeys.length % PUBLIC_KEY_LENGTH != 0) {
+            revert InvalidPubkeyArrayLength();
+        }
+    }
+}
+
 /**
  * @title A vault for temporary storage of withdrawals
  */
-contract WithdrawalVault is AccessControlEnumerable, Versioned {
+contract WithdrawalVault is AccessControlEnumerable, Versioned, Consolidation {
     using SafeERC20 for IERC20;
 
     ILido public immutable LIDO;
     address public immutable TREASURY;
 
     bytes32 public constant ADD_FULL_WITHDRAWAL_REQUEST_ROLE = keccak256("ADD_FULL_WITHDRAWAL_REQUEST_ROLE");
+    bytes32 public constant ADD_CONSOLIDATION_REQUEST_ROLE = keccak256("ADD_CONSOLIDATION_REQUEST_ROLE");
 
     // Events
     /**
@@ -51,12 +108,8 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned {
     error NotLido();
     error NotEnoughEther(uint256 requested, uint256 balance);
     error ZeroAmount();
-    error InsufficientTriggerableWithdrawalFee(
-        uint256 providedTotalFee,
-        uint256 requiredTotalFee,
-        uint256 requestCount
-    );
-    error TriggerableWithdrawalRefundFailed();
+    error InsufficientFee(uint256 providedFee, uint256 requiredFee);
+    error ExcessFeeRefundFailed();
 
     /**
      * @param _lido the Lido token (stETH) address
@@ -68,6 +121,13 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned {
 
         LIDO = ILido(_lido);
         TREASURY = _treasury;
+    }
+
+    /// @dev Ensures the contract’s ETH balance is unchanged.
+    modifier preservesEthBalance() {
+        uint256 balanceBeforeCall = address(this).balance - msg.value;
+        _;
+        assert(address(this).balance == balanceBeforeCall);
     }
 
     /// @notice Initializes the contract. Can be called only once.
@@ -159,32 +219,31 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned {
      */
     function addFullWithdrawalRequests(
         bytes calldata pubkeys
-    ) external payable onlyRole(ADD_FULL_WITHDRAWAL_REQUEST_ROLE) {
-        uint256 prevBalance = address(this).balance - msg.value;
+    ) external payable onlyRole(ADD_FULL_WITHDRAWAL_REQUEST_ROLE) preservesEthBalance {
+        uint256 feePerRequest = TriggerableWithdrawals.getWithdrawalRequestFee();
+        uint256 totalFee = (pubkeys.length / TriggerableWithdrawals.PUBLIC_KEY_LENGTH) * feePerRequest;
 
-        uint256 minFeePerRequest = TriggerableWithdrawals.getWithdrawalRequestFee();
-        uint256 totalFee = (pubkeys.length / TriggerableWithdrawals.PUBLIC_KEY_LENGTH) * minFeePerRequest;
+        _requireSufficientFee(totalFee);
 
-        if (totalFee > msg.value) {
-            revert InsufficientTriggerableWithdrawalFee(
-                msg.value,
-                totalFee,
-                pubkeys.length / TriggerableWithdrawals.PUBLIC_KEY_LENGTH
-            );
-        }
+        TriggerableWithdrawals.addFullWithdrawalRequests(pubkeys, feePerRequest);
 
-        TriggerableWithdrawals.addFullWithdrawalRequests(pubkeys, minFeePerRequest);
+        _refundExcessFee(totalFee);
+    }
 
-        uint256 refund = msg.value - totalFee;
-        if (refund > 0) {
-            (bool success, ) = msg.sender.call{value: refund}("");
+    function addConsolidationRequest(
+        bytes calldata sourcePubkeys,
+        bytes calldata targetPubkeys
+    ) external payable onlyRole(ADD_CONSOLIDATION_REQUEST_ROLE) preservesEthBalance {
+        _validatePubkeyArrays(sourcePubkeys, targetPubkeys);
 
-            if (!success) {
-                revert TriggerableWithdrawalRefundFailed();
-            }
-        }
+        uint256 feePerRequest = _getConsolidationRequestFee();
+        uint256 totalFee = (sourcePubkeys.length / PUBLIC_KEY_LENGTH) * feePerRequest;
 
-        assert(address(this).balance == prevBalance);
+        _requireSufficientFee(totalFee);
+
+        _addConsolidationRequest(sourcePubkeys, targetPubkeys, feePerRequest);
+
+        _refundExcessFee(totalFee);
     }
 
     /**
@@ -193,6 +252,23 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned {
      */
     function getWithdrawalRequestFee() external view returns (uint256) {
         return TriggerableWithdrawals.getWithdrawalRequestFee();
+    }
+
+    function _requireSufficientFee(uint256 requiredFee) internal view {
+        if (requiredFee > msg.value) {
+            revert InsufficientFee(msg.value, requiredFee);
+        }
+    }
+
+    function _refundExcessFee(uint256 fee) internal {
+        uint256 refund = msg.value - fee;
+        if (refund > 0) {
+            (bool success, ) = msg.sender.call{value: refund}("");
+
+            if (!success) {
+                revert ExcessFeeRefundFailed();
+            }
+        }
     }
 
     function _onlyNonZeroAddress(address _address) internal pure {
