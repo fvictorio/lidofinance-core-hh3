@@ -11,6 +11,7 @@ import "@openzeppelin/contracts-v4.4/token/ERC20/utils/SafeERC20.sol";
 import {Versioned} from "./utils/Versioned.sol";
 import {AccessControlEnumerable} from "./utils/access/AccessControlEnumerable.sol";
 import {TriggerableWithdrawals} from "../common/lib/TriggerableWithdrawals.sol";
+import {Consolidation} from "../common/lib/Consolidation.sol";
 import {ILidoLocator} from "../common/interfaces/ILidoLocator.sol";
 
 interface ILido {
@@ -22,66 +23,10 @@ interface ILido {
     function receiveWithdrawals() external payable;
 }
 
-contract Consolidation {
-    error InvalidPubkeyArrayLength();
-    error PubkeyArraysLengthMismatch();
-    error ConsolidationFeeReadFailed();
-    error ConsolidationFeeInvalidData();
-    error ConsolidationRequestAdditionFailed(bytes callData);
-
-    address constant CONSOLIDATION_REQUEST = 0x0000BBdDc7CE488642fb579F8B00f3a590007251;
-    uint256 internal constant PUBLIC_KEY_LENGTH = 48;
-
-    function _getConsolidationRequestFee() internal view returns (uint256) {
-        (bool success, bytes memory feeData) = CONSOLIDATION_REQUEST.staticcall("");
-
-        if (!success) {
-            revert ConsolidationFeeReadFailed();
-        }
-
-        if (feeData.length != 32) {
-            revert ConsolidationFeeInvalidData();
-        }
-
-        return abi.decode(feeData, (uint256));
-    }
-
-    function _addConsolidationRequest(
-        bytes calldata sourcePubkeys,
-        bytes calldata targetPubkeys,
-        uint256 feePerRequest
-    ) internal {
-        uint256 requestsCount = sourcePubkeys.length / PUBLIC_KEY_LENGTH;
-        bytes memory request = new bytes(96);
-
-        for (uint256 i = 0; i < requestsCount; i++) {
-            assembly {
-                calldatacopy(add(request, 32), add(sourcePubkeys.offset, mul(i, PUBLIC_KEY_LENGTH)), PUBLIC_KEY_LENGTH)
-                calldatacopy(add(request, 80), add(targetPubkeys.offset, mul(i, PUBLIC_KEY_LENGTH)), PUBLIC_KEY_LENGTH)
-            }
-
-            (bool success, ) = CONSOLIDATION_REQUEST.call{value: feePerRequest}(request);
-
-            if (!success) {
-                revert ConsolidationRequestAdditionFailed(request);
-            }
-        }
-    }
-
-    function _validatePubkeyArrays(bytes calldata sourcePubkeys, bytes calldata targetPubkeys) internal pure {
-        if (sourcePubkeys.length != targetPubkeys.length) {
-            revert PubkeyArraysLengthMismatch();
-        }
-        if (sourcePubkeys.length % PUBLIC_KEY_LENGTH != 0) {
-            revert InvalidPubkeyArrayLength();
-        }
-    }
-}
-
 /**
  * @title A vault for temporary storage of withdrawals
  */
-contract WithdrawalVault is AccessControlEnumerable, Versioned, Consolidation {
+contract WithdrawalVault is AccessControlEnumerable, Versioned {
     using SafeERC20 for IERC20;
 
     ILido public immutable LIDO;
@@ -213,6 +158,7 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned, Consolidation {
      *
      * @notice Reverts if:
      *         - The caller does not have the `ADD_FULL_WITHDRAWAL_REQUEST_ROLE`.
+     *         - The provided public key array is empty.
      *         - Validation of any of the provided public keys fails.
      *         - The provided total withdrawal fee is insufficient to cover all requests.
      *         - Refund of the excess fee fails.
@@ -230,18 +176,36 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned, Consolidation {
         _refundExcessFee(totalFee);
     }
 
-    function addConsolidationRequest(
+    /**
+     * @dev Submits EIP-7251 consolidation requests for the specified public keys.
+     *      Each request consolidate validators.
+     *      Refunds any excess fee to the caller after deducting the total fees,
+     *      which are calculated based on the number of requests and the current minimum fee per withdrawal request.
+     *
+     * @param sourcePubkeys A tightly packed array of 48-byte source public keys corresponding to validators requesting consolidation.
+     *                | ----- public key (48 bytes) ----- || ----- public key (48 bytes) ----- | ...
+     *
+     * @param targetPubkeys A tightly packed array of 48-byte target public keys corresponding to validators requesting consolidation.
+     *                | ----- public key (48 bytes) ----- || ----- public key (48 bytes) ----- | ...
+     *
+     * @notice Reverts if:
+     *         - The caller does not have the `ADD_CONSOLIDATION_REQUEST_ROLE`.
+     *         - Validation of any of the provided public keys fails.
+     *         - The source and target public key arrays have different lengths.
+     *         - The provided public key arrays is empty.
+     *         - The provided total withdrawal fee is insufficient to cover all requests.
+     *         - Refund of the excess fee fails.
+     */
+    function addConsolidationRequests(
         bytes calldata sourcePubkeys,
         bytes calldata targetPubkeys
     ) external payable onlyRole(ADD_CONSOLIDATION_REQUEST_ROLE) preservesEthBalance {
-        _validatePubkeyArrays(sourcePubkeys, targetPubkeys);
-
-        uint256 feePerRequest = _getConsolidationRequestFee();
-        uint256 totalFee = (sourcePubkeys.length / PUBLIC_KEY_LENGTH) * feePerRequest;
+        uint256 feePerRequest = Consolidation.getConsolidationRequestFee();
+        uint256 totalFee = (sourcePubkeys.length / Consolidation.PUBLIC_KEY_LENGTH) * feePerRequest;
 
         _requireSufficientFee(totalFee);
 
-        _addConsolidationRequest(sourcePubkeys, targetPubkeys, feePerRequest);
+        Consolidation.addConsolidationRequests(sourcePubkeys, targetPubkeys, feePerRequest);
 
         _refundExcessFee(totalFee);
     }
@@ -252,6 +216,14 @@ contract WithdrawalVault is AccessControlEnumerable, Versioned, Consolidation {
      */
     function getWithdrawalRequestFee() external view returns (uint256) {
         return TriggerableWithdrawals.getWithdrawalRequestFee();
+    }
+
+    /**
+     * @dev Retrieves the current EIP-7251 consolidation fee.
+     * @return The minimum fee required per consolidation request.
+     */
+    function getConsolidationRequestFee() external view returns (uint256) {
+        return Consolidation.getConsolidationRequestFee();
     }
 
     function _requireSufficientFee(uint256 requiredFee) internal view {
