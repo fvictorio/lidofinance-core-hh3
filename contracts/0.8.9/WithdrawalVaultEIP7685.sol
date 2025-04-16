@@ -100,6 +100,48 @@ abstract contract WithdrawalVaultEIP7685 is AccessControlEnumerable {
         return TriggerableWithdrawals.getWithdrawalRequestFee();
     }
 
+    /**
+     * @dev Submits EIP-7251 consolidation requests for the specified public keys.
+     *      Each request consolidate validators.
+     *      Refunds any excess fee to the caller after deducting the total fees,
+     *      which are calculated based on the number of requests and the current minimum fee per withdrawal request.
+     *
+     * @param sourcePubkeys A tightly packed array of 48-byte source public keys corresponding to validators requesting consolidation.
+     *                | ----- public key (48 bytes) ----- || ----- public key (48 bytes) ----- | ...
+     *
+     * @param targetPubkeys A tightly packed array of 48-byte target public keys corresponding to validators requesting consolidation.
+     *                | ----- public key (48 bytes) ----- || ----- public key (48 bytes) ----- | ...
+     *
+     * @notice Reverts if:
+     *         - The caller does not have the `ADD_CONSOLIDATION_REQUEST_ROLE`.
+     *         - Validation of any of the provided public keys fails.
+     *         - The source and target public key arrays have different lengths.
+     *         - The provided public key arrays is empty.
+     *         - The provided total withdrawal fee is insufficient to cover all requests.
+     *         - Refund of the excess fee fails.
+     */
+    function addConsolidationRequests(
+        bytes calldata sourcePubkeys,
+        bytes calldata targetPubkeys
+    ) external payable onlyRole(ADD_CONSOLIDATION_REQUEST_ROLE) preservesEthBalance {
+        uint256 feePerRequest = Consolidation.getConsolidationRequestFee();
+        uint256 totalFee = (sourcePubkeys.length / Consolidation.PUBLIC_KEY_LENGTH) * feePerRequest;
+
+        _requireSufficientFee(totalFee);
+
+        Consolidation.addConsolidationRequests(sourcePubkeys, targetPubkeys, feePerRequest);
+
+        _refundExcessFee(totalFee);
+    }
+
+    /**
+     * @dev Retrieves the current EIP-7251 consolidation fee.
+     * @return The minimum fee required per consolidation request.
+     */
+    function getConsolidationRequestFee() external view returns (uint256) {
+        return Consolidation.getConsolidationRequestFee();
+    }
+
     function _countPubkeys(bytes calldata pubkeys) internal pure returns (uint256) {
         return (pubkeys.length / PUBLIC_KEY_LENGTH);
     }
