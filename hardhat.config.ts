@@ -54,5 +54,8 @@ export default {
         },
       },
     ],
+    remappings: [
+      "forge-std/=foundry/lib/forge-std/src/",
+    ]
   },
 } satisfies HardhatUserConfig;
